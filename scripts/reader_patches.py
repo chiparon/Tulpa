@@ -130,7 +130,18 @@ def patch_wechat_db(data):
     # The downloaded upstream bytes have LF line endings.
     if data.count(before)!=1:raise ValueError('WeChat extraction changed; review legacy-key fallback')
     notice=b'# Modified by Tulpa contributors: bounded legacy key recovery; see scripts/reader_patches.py.\n'
-    return notice+data.replace(before,after)
+    return patch_wechat_group_names(notice+data.replace(before,after))
+
+
+def patch_wechat_group_names(data):
+    before=b'''                    idx[u] = r or n or u
+            finally:'''
+    after=b'''                    idx[u] = r or n or u
+                from chatlocal.wechat_names import add_unnamed_groups
+                add_unnamed_groups(conn, idx, self.wxid)
+            finally:'''
+    if data.count(before)!=1:raise ValueError('WeChat contact index changed; review unnamed group labels')
+    return data.replace(before,after)
 
 
 def patch_qq_helper(data):
