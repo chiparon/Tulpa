@@ -24,7 +24,7 @@ const html=`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>MCP U
         if(failList&&requests.some(x=>x.path.endsWith('/connections')))return reply({detail:'fixture list unavailable'},503);
         return reply({...state,connections,recent:[],data_platforms:{qq:3,wechat:2},onebot_configured:false});
       }
-      if(url.pathname==='/api/mcp/conversations')return reply({items:[{platform:'qq',conversation_id:'111:group:222',name:'测试会话',count:3}],has_more:false,next_offset:80});
+      if(url.pathname==='/api/mcp/conversations')return reply({items:[{platform:'qq',conversation_id:'111:group:222',name:'测试会话',count:3},{platform:'wechat',conversation_id:'fixture@chatroom',name:'合成微信班级群',count:2}].filter(item=>item.name.includes(url.searchParams.get('query')||'')),has_more:false,next_offset:80});
       if(url.pathname==='/api/mcp/live-groups')return reply({items:[{platform:'qq',conversation_id:'111:group:444',name:'未导入的实时群',count:'OneBot'}]});
       if(url.pathname==='/api/desktop/preferences')return reply({background:false});
       if(url.pathname==='/api/desktop/status')return reply({owned:true});
@@ -37,6 +37,10 @@ const html=`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>MCP U
       if(url.pathname==='/api/mcp/chat-personas')return reply({personas:[{id:'little_whale',name:'小鲸鱼'},{id:'little_whale_v2',name:'小鲸鱼2号'}]});
       if(url.pathname.endsWith('/learning')&&method==='GET')return reply(learning);
       const body=r.postDataJSON();requests.push({path:url.pathname,method,body});
+      if(url.pathname==='/api/mcp/connections/fixture-only/codex'&&method==='POST'){
+        if(body.server_name==='tulpa')return reply({detail:'Codex 已有名为 tulpa 的其他连接，请修改 MCP 名称后重试。'},409);
+        return reply({installed:true,changed:true});
+      }
       if(url.pathname==='/api/mcp/chat-library'&&method==='POST'){
         const change=body.change;
         if(change.kind)learning.expressions[0].enabled=change.enabled;else if(change.hourly_calls)learning.hourly_call_budget=change.hourly_calls;else learning.enabled=change.enabled;
@@ -69,7 +73,7 @@ const html=`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>MCP U
     const waitText=(id,text)=>page.waitForFunction(([id,text])=>document.getElementById(id).textContent.includes(text),[id,text]);
     async function setup(running=false){
       state={enabled:running,running,port:18777,url:'http://127.0.0.1:18777/mcp',error:''};requests=[];mode='ok';failList=false;delayCreate=false;sessions=[];connections=[];
-      await page.goto('http://127.0.0.1:39879/');await page.locator('#open-mcp').click();await page.locator('#mcp-chats input').waitFor();
+      await page.goto('http://127.0.0.1:39879/');await page.locator('#open-mcp').click();await page.locator('#mcp-chats input').first().waitFor();
       await page.locator('#mcp-name').fill('qqmcp');await page.locator('#mcp-all').check();
       await page.locator('#mcp-start').fill('2026-09-01');await page.locator('#mcp-end').fill('2026-10-03');
     }
@@ -124,11 +128,52 @@ const html=`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>MCP U
     await setup(true);await page.locator('#mcp-chat').check();await page.locator('#mcp-chat_reactions').check();await create();
     assert.equal(requests[0].body.chat_reactions,true);assert.equal(requests[0].body.chat_images,false);
     assert.ok((await page.locator('#mcp-config').inputValue()).includes('tools.react_to_chat_message'));
+    // Rename after a collision; preview, clipboard and install all use the name.
+    await page.locator('#mcp-install-codex').click();await waitText('mcp-error','已有名为 tulpa');
+    await page.locator('#mcp-server-name').fill('tulpa_wechat');
+    const namedConfig=await page.locator('#mcp-config').inputValue();
+    assert.ok(namedConfig.startsWith('[mcp_servers.tulpa_wechat]'));
+    assert.ok(namedConfig.includes('[mcp_servers.tulpa_wechat.tools.react_to_chat_message]'));
+    assert.ok(!namedConfig.includes('[mcp_servers.tulpa.'));
+    await page.evaluate(()=>{Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.fixtureClipboard=text;}}});});
+    await page.locator('#mcp-copy').click();await waitText('mcp-copy','已复制');
+    assert.equal(await page.evaluate(()=>window.fixtureClipboard),namedConfig);
+    await page.locator('#mcp-install-codex').click();await waitText('mcp-install-result','已写入本机 Codex：tulpa_wechat');
+    assert.deepEqual(requests.at(-1).body,{token:'fixture-only-not-a-real-credential',server_name:'tulpa_wechat'});
+    const beforeInvalid=requests.length;
+    await page.locator('#mcp-server-name').fill('nested.name');
+    assert.equal(await page.locator('#mcp-install-codex').isEnabled(),false);
+    assert.equal(await page.locator('#mcp-copy').isEnabled(),false);
+    assert.equal(await page.locator('#mcp-config').inputValue(),'');assert.equal(requests.length,beforeInvalid);
+    await page.locator('#mcp-server-name').fill('tulpa-qq_2');
+    assert.equal(await page.locator('#mcp-install-codex').isEnabled(),true);
     await setup(true);await page.locator('#mcp-all').uncheck();await page.locator('#mcp-live-groups').click();
     await waitText('mcp-chats','未导入的实时群');
     await page.locator('#mcp-search').fill('实时');await waitText('mcp-chats','未导入的实时群');
     await page.locator('#mcp-chats input').check();await page.locator('#mcp-chat').check();await create();
     assert.deepEqual(requests[0].body.conversations,[['qq','111:group:444']]);
+    // Leaving the OneBot picker must restore imported WeChat conversations.
+    await setup(true);await page.locator('#mcp-all').uncheck();await page.locator('#mcp-live-groups').click();
+    await waitText('mcp-chats','未导入的实时群');
+    await page.locator('#mcp-qq').uncheck();
+    await waitText('mcp-chats','合成微信班级群');
+    assert.equal(await page.locator('#mcp-live-groups').isVisible(),false);
+    assert.equal(await page.locator('#mcp-chats label').count(),1);
+    assert.equal((await page.locator('#mcp-chats').textContent()).includes('qq ·'),false);
+    await page.locator('#mcp-wechat').uncheck();await waitText('mcp-chats','请先选择');
+    assert.equal(await page.locator('#mcp-chats input').count(),0);
+    await page.locator('#mcp-wechat').check();await page.locator('#mcp-search').fill('微信班级');
+    await waitText('mcp-chats','合成微信班级群');
+    assert.equal(await page.getByRole('checkbox',{name:'wechat · 合成微信班级群 (2)'}).isEnabled(),true);
+    await page.getByRole('checkbox',{name:'wechat · 合成微信班级群 (2)'}).check();
+    await create();assert.deepEqual(requests[0].body.conversations,[['wechat','fixture@chatroom']]);
+    assert.deepEqual(requests[0].body.platforms,['wechat']);
+    // Closing and reopening the dialog also leaves the cached OneBot list.
+    await setup(true);await page.locator('#mcp-all').uncheck();await page.locator('#mcp-live-groups').click();
+    await waitText('mcp-chats','未导入的实时群');
+    await page.locator('#mcp-search').fill('微信班级');await waitText('mcp-chats','没有匹配');
+    await page.locator('#mcp-close').click();await page.locator('#open-mcp').click();
+    await waitText('mcp-chats','合成微信班级群');assert.equal(await page.getByRole('checkbox',{name:'wechat · 合成微信班级群 (2)'}).isEnabled(),true);
     // Display literal persona, preserve expanded details across polling, stop one/all.
     learning={enabled:true,independence:'degraded',library:{checked_expressions:4,known_jargon:0,observing_jargon:17,last_completed_at:null},run:{completed_batches:0,buffered:8},calls_last_hour:2,hourly_call_budget:20,expression_count:4,jargon_count:17,
       expressions:[{id:'synthetic-expression',situation:'<img src=x onerror=alert(1)> 合成适用场景',style:'合成抽象表达方式；长文本自动换行。'.repeat(8),count:1,enabled:true,independence:'degraded',evidence_version:2,surface_form:'不然{对象}？'}],jargon:[{id:'synthetic-word',term:'云朵开机',meaning:'',enabled:true,is_jargon:false,count:1,independence:'degraded'}]};

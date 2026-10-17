@@ -90,8 +90,8 @@ def install_mcp_routes(app, store=None):
         except GrantConflict as exc:raise HTTPException(409, str(exc)) from None
         except ValueError as exc:raise HTTPException(400, str(exc)) from None
 
-    def token_for(body):
-        if set(body)!={'token'} or not isinstance(body['token'],str):raise HTTPException(400,'连接凭据字段无效。')
+    def token_for(body, *, extra=()):
+        if set(body)-{'token',*extra} or not isinstance(body.get('token'),str):raise HTTPException(400,'连接凭据字段无效。')
         try:return access.authorize(body['token'])
         except AccessDenied as exc:raise HTTPException(400,str(exc)) from None
 
@@ -109,11 +109,11 @@ def install_mcp_routes(app, store=None):
 
     @app.post('/api/mcp/connections/{gid}/codex')
     def connect_codex(gid:str,request:Request,body:dict):
-        local(request,True);grant=token_for(body)
+        local(request,True);grant=token_for(body,extra=('server_name',))
         if grant['id']!=gid:raise HTTPException(403)
         if not service.status()['running']:raise HTTPException(400,'请先启动本机 MCP 服务。')
         from .mcp_connect import install_codex
-        try:return install_codex(service.status()['url'],body['token'],scope=grant['scope'])
+        try:return install_codex(service.status()['url'],body['token'],scope=grant['scope'],server_name=body.get('server_name','tulpa'))
         except ValueError as exc:raise HTTPException(409,str(exc)) from None
         except OSError:raise HTTPException(400,'无法写入本机 Codex 配置，请使用复制配置方式。') from None
 
@@ -223,14 +223,14 @@ def install_mcp_routes(app, store=None):
         except ValueError as exc:raise HTTPException(404,str(exc)) from None
 
     @app.get('/api/mcp/conversations')
-    def conversations(request: Request, query: str='', offset: int=0):
+    def conversations(request: Request, query: str='', offset: int=0, platform: str=''):
         local(request)
-        if len(query) > 100 or offset < 0:
+        if len(query) > 100 or offset < 0 or platform not in ('', 'qq', 'wechat'):
             raise HTTPException(400)
         with store.connect() as db:
             rows = [dict(r) for r in db.execute('''SELECT platform,conversation_id,max(conversation) name,count(*) count
-                FROM messages WHERE instr(lower(conversation),lower(?))>0
-                GROUP BY platform,conversation_id ORDER BY platform,name LIMIT 81 OFFSET ?''', (query, offset))]
+                FROM messages WHERE instr(lower(conversation),lower(?))>0 AND (?='' OR platform=?)
+                GROUP BY platform,conversation_id ORDER BY platform,name LIMIT 81 OFFSET ?''', (query, platform, platform, offset))]
         return dict(items=rows[:80], has_more=len(rows)>80, next_offset=offset+80)
 
     return service
